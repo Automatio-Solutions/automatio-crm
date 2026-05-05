@@ -13,6 +13,7 @@ const DOC_PREFIXES: Record<DocType, string> = {
     INVOICE: "F",
     CREDIT_NOTE: "R",
     PURCHASE_INVOICE: "FP",
+    PROFORMA_INVOICE: "PF",
 };
 
 /**
@@ -20,14 +21,15 @@ const DOC_PREFIXES: Record<DocType, string> = {
  *
  * - INVOICE  → F{YY}/{NN}    (e.g. F26/03)
  * - CREDIT_NOTE → R{YY}/{NN}
+ * - PROFORMA_INVOICE → PF{YY}/{NN}
  * - QUOTE    → PRE-{YYYY}-{NNNN}
  * - PURCHASE → FP-{YYYY}-{NNNN}
  */
 function buildFormatted(docType: DocType, year: number, num: number): string {
     const prefix = DOC_PREFIXES[docType];
 
-    if (docType === "INVOICE" || docType === "CREDIT_NOTE") {
-        // Short format: F26/03 or R26/01
+    if (docType === "INVOICE" || docType === "CREDIT_NOTE" || docType === "PROFORMA_INVOICE") {
+        // Short format: F26/03 or R26/01 or PF26/01
         const yy = String(year % 100).padStart(2, "0");
         const nn = String(num).padStart(2, "0");
         return `${prefix}${yy}/${nn}`;

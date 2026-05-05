@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { logActivity } from "@/lib/audit";
 import { NextResponse } from "next/server";
 
-// GET /api/invoices — List invoices
+// GET /api/proformas — List proforma invoices
 export async function GET(request: Request) {
     try {
         const { searchParams } = new URL(request.url);
@@ -18,10 +18,10 @@ export async function GET(request: Request) {
             dateFilter.lte = toDate;
         }
 
-        const invoices = await prisma.invoice.findMany({
+        const proformas = await prisma.invoice.findMany({
             where: {
                 deletedAt: null,
-                type: { not: "PROFORMA" },
+                type: "PROFORMA",
                 ...(status ? { status: status as any } : {}),
                 ...(from || to ? { createdAt: dateFilter } : {}),
             },
@@ -31,14 +31,14 @@ export async function GET(request: Request) {
             orderBy: { createdAt: "desc" },
         });
 
-        return NextResponse.json(invoices);
+        return NextResponse.json(proformas);
     } catch (error) {
-        console.error("Error fetching invoices:", error);
-        return NextResponse.json({ error: "Error al obtener facturas" }, { status: 500 });
+        console.error("Error fetching proformas:", error);
+        return NextResponse.json({ error: "Error al obtener proformas" }, { status: 500 });
     }
 }
 
-// POST /api/invoices — Create a new invoice directly (DRAFT, no quote needed)
+// POST /api/proformas — Create a new proforma invoice (DRAFT)
 export async function POST(request: Request) {
     try {
         const body = await request.json();
@@ -83,11 +83,11 @@ export async function POST(request: Request) {
         const taxCents = processedLines.reduce((sum: number, l: any) => sum + l.lineTaxCents, 0);
         const totalCents = subtotalCents + taxCents;
 
-        const invoice = await prisma.invoice.create({
+        const proforma = await prisma.invoice.create({
             data: {
                 companyId: company.id,
                 clientId,
-                type: "INVOICE",
+                type: "PROFORMA",
                 status: "DRAFT",
                 notes: notes || null,
                 publicNotes: publicNotes || null,
@@ -97,7 +97,6 @@ export async function POST(request: Request) {
                 taxCents,
                 totalCents,
                 paidCents: 0,
-                // sourceQuoteId is null — direct invoice creation
                 lines: {
                     create: processedLines,
                 },
@@ -108,13 +107,13 @@ export async function POST(request: Request) {
             },
         });
 
-        await logActivity(company.id, null, "invoice", invoice.id, "CREATE", {
-            direct: true,
+        await logActivity(company.id, null, "invoice", proforma.id, "CREATE", {
+            type: "PROFORMA",
         });
 
-        return NextResponse.json(invoice, { status: 201 });
+        return NextResponse.json(proforma, { status: 201 });
     } catch (error) {
-        console.error("Error creating invoice:", error);
-        return NextResponse.json({ error: "Error al crear factura" }, { status: 500 });
+        console.error("Error creating proforma:", error);
+        return NextResponse.json({ error: "Error al crear proforma" }, { status: 500 });
     }
 }

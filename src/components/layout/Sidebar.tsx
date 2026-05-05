@@ -18,6 +18,7 @@ const NAV_ITEMS = [
             { label: "Servicios", href: "/services", icon: "⚙️" },
             { label: "Presupuestos", href: "/quotes", icon: "📝" },
             { label: "Facturas", href: "/invoices", icon: "📄" },
+            { label: "Proformas", href: "/proformas", icon: "📋" },
         ],
     },
     {

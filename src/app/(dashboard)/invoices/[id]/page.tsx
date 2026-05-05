@@ -50,14 +50,35 @@ export default function InvoiceDetailPage() {
     // ── ACTION HANDLERS ─────────────────────────────────
 
     async function handleEmit() {
-        if (!await showConfirm("¿Emitir factura? Se asignará número definitivo.")) return;
+        const isProforma = invoice?.type === "PROFORMA";
+        const label = isProforma ? "proforma" : "factura";
+        if (!await showConfirm(`¿Emitir ${label}? Se asignará número definitivo.`)) return;
         setActionLoading("emit");
         try {
-            const res = await fetch(`/api/invoices/${id}/emit`, { method: "POST" });
+            const endpoint = isProforma
+                ? `/api/proformas/${id}/emit`
+                : `/api/invoices/${id}/emit`;
+            const res = await fetch(endpoint, { method: "POST" });
             if (!res.ok) throw new Error((await res.json()).error);
             const updated = await res.json();
             setInvoice(updated);
-            showSuccess("Factura emitida correctamente");
+            showSuccess(`${isProforma ? 'Proforma' : 'Factura'} emitida correctamente`);
+        } catch (err: any) {
+            showError(err.message);
+        } finally {
+            setActionLoading("");
+        }
+    }
+
+    async function handleConvertToInvoice() {
+        if (!await showConfirm("¿Convertir esta proforma en factura? Se creará una nueva factura borrador con los mismos datos.")) return;
+        setActionLoading("convert");
+        try {
+            const res = await fetch(`/api/proformas/${id}/convert`, { method: "POST" });
+            if (!res.ok) throw new Error((await res.json()).error);
+            const newInvoice = await res.json();
+            showSuccess("Factura creada desde proforma");
+            router.push(`/invoices/${newInvoice.id}`);
         } catch (err: any) {
             showError(err.message);
         } finally {
@@ -192,12 +213,14 @@ export default function InvoiceDetailPage() {
         );
     }
 
+    const isProforma = invoice.type === "PROFORMA";
     const st = STATUS_LABELS[invoice.status] || { label: invoice.status, class: "badge-draft" };
     const isDraft = invoice.status === "DRAFT";
     const isIssued = invoice.status === "ISSUED";
     const isPartiallyPaid = invoice.status === "PARTIALLY_PAID";
     const hasNumber = !!invoice.number;
-    const canMarkPaid = isIssued || isPartiallyPaid;
+    const canMarkPaid = !isProforma && (isIssued || isPartiallyPaid);
+    const docTypeLabel = isProforma ? "Proforma" : invoice.type === "CREDIT_NOTE" ? "Rectificativa" : "Factura";
 
     const formatEur = (cents: number) => (cents / 100).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
 
@@ -206,12 +229,15 @@ export default function InvoiceDetailPage() {
             <div className="page-header">
                 <div>
                     <h1>
-                        {invoice.number || "Factura (Borrador)"}
+                        {invoice.number || `${docTypeLabel} (Borrador)`}
                     </h1>
                     <p className="page-header-sub">
                         <span className={`badge ${st.class}`}>{st.label}</span>
                         {" · "}
                         {invoice.client?.name}
+                        {isProforma && (
+                            <span className="badge badge-info" style={{ marginLeft: 8 }}>Proforma</span>
+                        )}
                         {invoice.type === "CREDIT_NOTE" && (
                             <span className="badge badge-warning" style={{ marginLeft: 8 }}>Rectificativa</span>
                         )}
@@ -230,8 +256,22 @@ export default function InvoiceDetailPage() {
                             <button onClick={handleDelete} className="btn btn-danger btn-sm">🗑️</button>
                         </>
                     )}
-                    {/* ISSUED actions */}
-                    {isIssued && (
+                    {/* ISSUED + PROFORMA: convert to invoice */}
+                    {isIssued && isProforma && (
+                        <>
+                            <button onClick={handleConvertToInvoice} className="btn btn-primary" disabled={!!actionLoading}>
+                                {actionLoading === "convert" ? "Convirtiendo..." : "📄 Convertir a Factura"}
+                            </button>
+                            <button onClick={handleDownloadPDF} className="btn btn-secondary" disabled={!!actionLoading}>
+                                {actionLoading === "pdf" ? "Generando..." : "📄 PDF"}
+                            </button>
+                            <button onClick={handleSendEmail} className="btn btn-secondary" disabled={!!actionLoading}>
+                                {actionLoading === "send" ? "Enviando..." : "📧 Enviar"}
+                            </button>
+                        </>
+                    )}
+                    {/* ISSUED + regular invoice actions */}
+                    {isIssued && !isProforma && (
                         <>
                             <button onClick={handleMarkPaid} className="btn btn-primary" disabled={!!actionLoading}>
                                 {actionLoading === "paid" ? "Procesando..." : "💰 Marcar Cobrada"}
@@ -251,7 +291,7 @@ export default function InvoiceDetailPage() {
                         </>
                     )}
                     {/* PARTIALLY_PAID actions */}
-                    {isPartiallyPaid && (
+                    {isPartiallyPaid && !isProforma && (
                         <>
                             <button onClick={handleMarkPaid} className="btn btn-primary" disabled={!!actionLoading}>
                                 {actionLoading === "paid" ? "Procesando..." : "💰 Cobrar Resto"}
@@ -270,7 +310,7 @@ export default function InvoiceDetailPage() {
                             📄 PDF
                         </button>
                     )}
-                    <Link href="/invoices" className="btn btn-ghost">← Volver</Link>
+                    <Link href={isProforma ? "/proformas" : "/invoices"} className="btn btn-ghost">← Volver</Link>
                 </div>
             </div>
 

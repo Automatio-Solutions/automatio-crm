@@ -169,7 +169,9 @@ export function generateDocumentPDF(data: DocumentData): Buffer {
             ? "Presupuesto"
             : data.invoiceType === "CREDIT_NOTE"
                 ? "Factura Rectificativa"
-                : "Factura";
+                : data.invoiceType === "PROFORMA"
+                    ? "Factura Proforma"
+                    : "Factura";
 
     doc.setTextColor(...TEXT_DARK);
     doc.setFontSize(26);

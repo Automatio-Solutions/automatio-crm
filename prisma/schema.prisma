@@ -32,6 +32,7 @@ enum DocType {
   INVOICE
   CREDIT_NOTE
   PURCHASE_INVOICE
+  PROFORMA_INVOICE
 }
 
 enum QuoteStatus {
@@ -53,6 +54,7 @@ enum InvoiceStatus {
 enum InvoiceType {
   INVOICE
   CREDIT_NOTE
+  PROFORMA
 }
 
 enum PurchaseInvoiceStatus {
