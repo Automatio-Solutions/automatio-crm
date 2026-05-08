@@ -26,6 +26,10 @@ export interface ScannedInvoiceData {
     dueDate: string;
     lines: ScannedLineItem[];
     notes: string;
+    /** % de retención IRPF detectado en el documento (0 si no hay). */
+    retentionPct: number;
+    /** Importe de retención en euros (0 si no hay). */
+    retentionEuros: number;
     confidence: number;
     /** Avisos detectados por la IA (totales que no cuadran, retenciones, campos vacíos, etc.). */
     warnings: string[];

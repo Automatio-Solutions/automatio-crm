@@ -38,6 +38,12 @@ REGLAS IMPORTANTES:
 - Si hay varias líneas de factura, extrae CADA una por separado
 - "unitPriceEuros" es el precio unitario SIN IVA (si el precio incluye IVA, calcula el precio sin IVA)
 
+REGLAS PARA RETENCIÓN IRPF:
+- Si el documento aplica retención de IRPF (típicamente 7% o 15% en España), rellena
+  "retentionPct" con el porcentaje (ej: 15) y "retentionEuros" con el importe en euros (ej: 150).
+- Busca palabras como "retención", "ret.", "IRPF", o filas con un porcentaje negativo aplicado al subtotal.
+- Si no hay retención, deja "retentionPct": 0 y "retentionEuros": 0.
+
 REGLAS PARA EL CAMPO "warnings" (lista de avisos detectados):
 Añade un aviso CONCRETO y ACCIONABLE para cada uno de estos casos que detectes:
 - El total no cuadra con base + IVA (especifica las cifras: "Total 1.060 € no coincide con base 1.000 + IVA 210 = 1.210")
@@ -70,6 +76,8 @@ Devuelve SOLO un JSON válido con esta estructura exacta, SIN markdown, SIN back
     }
   ],
   "notes": "Información adicional relevante",
+  "retentionPct": 15,
+  "retentionEuros": 150.00,
   "confidence": 85,
   "warnings": ["aviso 1", "aviso 2"]
 }

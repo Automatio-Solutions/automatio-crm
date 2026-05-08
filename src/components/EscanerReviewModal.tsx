@@ -45,9 +45,6 @@ const STATUSES: { id: Status; label: string; dot: string }[] = [
     { id: "PAID", label: "Pagada", dot: "var(--color-success)" },
 ];
 
-const RETENTION_RATES = [0, 7, 15] as const;
-type RetentionRate = (typeof RETENTION_RATES)[number];
-
 interface EscanerReviewModalProps {
     isOpen: boolean;
     scanData: ScannedInvoiceData | null;
@@ -78,7 +75,9 @@ export default function EscanerReviewModal({
     const [issueDate, setIssueDate] = useState("");
     const [dueDate, setDueDate] = useState("");
     const [status, setStatus] = useState<Status>("DRAFT");
-    const [retentionPct, setRetentionPct] = useState<RetentionRate>(0);
+    // Retención IRPF: % es la fuente de verdad. El € se calcula a partir
+    // del subtotal × %. Si el usuario edita el €, recalculamos el %.
+    const [retentionPct, setRetentionPct] = useState<number>(0);
     const [notes, setNotes] = useState("");
     const [lines, setLines] = useState<LineItem[]>([]);
     const [saving, setSaving] = useState(false);
@@ -109,7 +108,10 @@ export default function EscanerReviewModal({
         setIssueDate(scanData.issueDate || "");
         setDueDate(scanData.dueDate || "");
         setStatus("DRAFT");
-        setRetentionPct(0);
+        // Inicializar retención: si Claude detectó un %, lo usamos.
+        // Si no, intentamos derivarlo del importe en euros y el subtotal del documento.
+        const detectedPct = Number(scanData.retentionPct) || 0;
+        setRetentionPct(Math.max(0, Math.min(100, detectedPct)));
         setNotes(scanData.notes || "");
 
         const initialLines: LineItem[] = (scanData.lines || []).map((sl) => {
@@ -515,10 +517,6 @@ export default function EscanerReviewModal({
                             <StatusPills value={status} onChange={setStatus} />
                         </Field>
 
-                        <Field label="Retención IRPF">
-                            <RetentionPills value={retentionPct} onChange={setRetentionPct} />
-                        </Field>
-
                         <SectionDivider label="Líneas" />
 
                         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -563,6 +561,55 @@ export default function EscanerReviewModal({
                                 />
                             )}
                             <Row label="Total" value={fmtEuros(totals.totalCents)} bold />
+                        </div>
+
+                        {/* Retención IRPF: dos inputs en línea, mismo formato que NIF / Nº factura.
+                            % es la fuente de verdad; el € se calcula y, si el usuario lo edita,
+                            recalculamos el %. */}
+                        <div className="form-row">
+                            <Field label="Retención IRPF %">
+                                <input
+                                    type="number"
+                                    className="form-input"
+                                    value={retentionPct === 0 ? "" : String(retentionPct)}
+                                    placeholder="0"
+                                    min="0"
+                                    max="100"
+                                    step="0.01"
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        if (!Number.isFinite(v)) {
+                                            setRetentionPct(0);
+                                        } else {
+                                            setRetentionPct(Math.max(0, Math.min(100, v)));
+                                        }
+                                    }}
+                                />
+                            </Field>
+                            <Field label="Retención €">
+                                <input
+                                    type="number"
+                                    className="form-input"
+                                    value={
+                                        totals.retentionCents === 0
+                                            ? ""
+                                            : (totals.retentionCents / 100).toFixed(2)
+                                    }
+                                    placeholder="0.00"
+                                    min="0"
+                                    step="0.01"
+                                    onChange={(e) => {
+                                        const newEuros = parseFloat(e.target.value);
+                                        if (!Number.isFinite(newEuros) || totals.subtotalCents === 0) {
+                                            setRetentionPct(0);
+                                            return;
+                                        }
+                                        // Recalcular el % a partir del nuevo importe en euros.
+                                        const newPct = (newEuros * 100 * 100) / totals.subtotalCents;
+                                        setRetentionPct(Math.max(0, Math.min(100, newPct)));
+                                    }}
+                                />
+                            </Field>
                         </div>
 
                         <Field label="Notas">
@@ -618,54 +665,6 @@ function SectionDivider({ label }: { label: string }) {
                 {label}
             </div>
             <div style={{ flex: 1, height: 1, background: "var(--color-border)" }} />
-        </div>
-    );
-}
-
-function RetentionPills({
-    value,
-    onChange,
-}: {
-    value: RetentionRate;
-    onChange: (v: RetentionRate) => void;
-}) {
-    return (
-        <div
-            style={{
-                display: "flex",
-                gap: 4,
-                background: "var(--color-bg-tertiary)",
-                padding: 3,
-                borderRadius: "var(--radius-md)",
-                border: "1px solid var(--color-border)",
-            }}
-        >
-            {RETENTION_RATES.map((r) => {
-                const active = value === r;
-                const label = r === 0 ? "Sin retención" : `${r}%`;
-                return (
-                    <button
-                        key={r}
-                        type="button"
-                        onClick={() => onChange(r)}
-                        style={{
-                            flex: 1,
-                            padding: "7px 10px",
-                            borderRadius: "var(--radius-sm)",
-                            fontSize: 12.5,
-                            fontWeight: 500,
-                            background: active ? "var(--color-surface)" : "transparent",
-                            color: active ? "var(--color-text)" : "var(--color-text-muted)",
-                            boxShadow: active ? "var(--shadow-sm)" : "none",
-                            border: "none",
-                            cursor: "pointer",
-                            transition: "var(--transition-fast)",
-                        }}
-                    >
-                        {label}
-                    </button>
-                );
-            })}
         </div>
     );
 }

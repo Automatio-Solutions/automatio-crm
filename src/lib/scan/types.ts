@@ -23,6 +23,8 @@ export interface ScannedInvoice {
     dueDate: string;           // YYYY-MM-DD
     lines: ScannedLineItem[];
     notes: string;
+    retentionPct: number;      // % de retención IRPF detectado (0 si no hay)
+    retentionEuros: number;    // importe de retención en euros (0 si no hay)
     confidence: number;        // 0-100
     warnings: string[];        // problemas detectados por Claude (totales que no cuadran, retenciones, etc.)
 }

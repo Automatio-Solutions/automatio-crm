@@ -226,8 +226,16 @@ function sanitize(raw: unknown): ScannedInvoice {
         issueDate: String(r.issueDate ?? ""),
         dueDate: String(r.dueDate ?? ""),
         notes: String(r.notes ?? ""),
+        retentionPct: clampRetention(Number(r.retentionPct)),
+        retentionEuros: Math.max(0, Number(r.retentionEuros) || 0),
         confidence: Number(r.confidence) || 0,
         lines,
         warnings,
     };
+}
+
+/** Asegura un % de retención razonable: 0..100. */
+function clampRetention(v: number): number {
+    if (!Number.isFinite(v)) return 0;
+    return Math.max(0, Math.min(100, v));
 }
