@@ -40,7 +40,16 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { providerId, providerInvoiceNumber, notes, issueDate, dueDate, lines, retentionRate } = body;
+        const {
+            providerId,
+            providerInvoiceNumber,
+            notes,
+            issueDate,
+            dueDate,
+            lines,
+            attachment,
+            retentionPct: retentionPctRaw,
+        } = body;
 
         if (!providerId) {
             return NextResponse.json({ error: "El proveedor es obligatorio" }, { status: 400 });
@@ -84,9 +93,13 @@ export async function POST(request: Request) {
         const subtotalCents = processedLines.reduce((sum: number, l: any) => sum + l.lineSubtotalCents, 0);
         const taxCents = processedLines.reduce((sum: number, l: any) => sum + l.lineTaxCents, 0);
 
-        // Retention (IRPF) — applied on the subtotal
-        const parsedRetentionRate = parseFloat(retentionRate) || 0;
-        const retentionCents = Math.round(subtotalCents * parsedRetentionRate / 100);
+        // Retención (IRPF u otra). Aplicada sobre la base imponible.
+        // Aceptamos cualquier % razonable (0-100); típicamente 0, 7 o 15.
+        const retentionPctNum = Number(retentionPctRaw);
+        const retentionPct = Number.isFinite(retentionPctNum)
+            ? Math.max(0, Math.min(100, retentionPctNum))
+            : 0;
+        const retentionCents = Math.round((subtotalCents * retentionPct) / 100);
 
         // Total = subtotal + IVA - retention
         const totalCents = subtotalCents + taxCents - retentionCents;
@@ -102,7 +115,7 @@ export async function POST(request: Request) {
                 dueDate: dueDate ? new Date(dueDate) : null,
                 subtotalCents,
                 taxCents,
-                retentionRate: parsedRetentionRate,
+                retentionPct,
                 retentionCents,
                 totalCents,
                 lines: {
@@ -114,6 +127,27 @@ export async function POST(request: Request) {
                 lines: { include: { tax: true }, orderBy: { position: "asc" } },
             },
         });
+
+        // Si la factura viene del escáner, registramos el archivo como Document
+        // asociado a esta PurchaseInvoice. Si falla, lo dejamos pasar (la factura
+        // ya está creada y el archivo sigue en Storage; no merece la pena bloquear).
+        if (attachment && typeof attachment === "object" && attachment.storagePath) {
+            try {
+                await prisma.document.create({
+                    data: {
+                        companyId: company.id,
+                        entityType: "PURCHASE_INVOICE",
+                        entityId: purchase.id,
+                        filename: String(attachment.filename || "scan"),
+                        mimeType: String(attachment.mimeType || "application/octet-stream"),
+                        sizeBytes: Number(attachment.sizeBytes) || 0,
+                        storagePath: String(attachment.storagePath),
+                    },
+                });
+            } catch (docErr) {
+                console.error("Error linking scanned attachment to purchase:", docErr);
+            }
+        }
 
         return NextResponse.json(purchase, { status: 201 });
     } catch (error) {

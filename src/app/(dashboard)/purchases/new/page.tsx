@@ -6,10 +6,12 @@ import Link from "next/link";
 import { useNotification } from "@/components/NotificationContext";
 import ProviderModal, { type ProviderModalInitialData } from "@/components/ProviderModal";
 import InvoiceScanner, { type ScannedInvoiceData } from "@/components/InvoiceScanner";
+import EscanerReviewModal from "@/components/EscanerReviewModal";
 
 interface Provider {
     id: string;
     name: string;
+    taxId?: string | null;
 }
 
 interface Tax {
@@ -27,11 +29,6 @@ interface LineItem {
     unitPriceEuros: string;
     taxId: string;
     taxRate: number;
-}
-
-interface ScannedProviderInfo {
-    name: string;
-    taxId: string;
 }
 
 function newLine(): LineItem {
@@ -152,7 +149,7 @@ function LineItemEditor({
 
 export default function NewPurchasePage() {
     const router = useRouter();
-    const { showError } = useNotification();
+    const { showError, showSuccess } = useNotification();
     const [providers, setProviders] = useState<Provider[]>([]);
     const [taxes, setTaxes] = useState<Tax[]>([]);
     const [providerId, setProviderId] = useState("");
@@ -164,9 +161,10 @@ export default function NewPurchasePage() {
     const [saving, setSaving] = useState(false);
     const [showProviderModal, setShowProviderModal] = useState(false);
     const [showScanner, setShowScanner] = useState(true);
-    const [scannedProviderInfo, setScannedProviderInfo] = useState<ScannedProviderInfo | null>(null);
     const [providerModalInitial, setProviderModalInitial] = useState<ProviderModalInitialData | undefined>(undefined);
-    const [retentionRate, setRetentionRate] = useState(0);
+    const [retentionPct, setRetentionPct] = useState(0);
+    // Datos del escaneo: cuando llegan, abren el modal de revisión.
+    const [scanData, setScanData] = useState<ScannedInvoiceData | null>(null);
 
     useEffect(() => {
         fetch("/api/providers").then((r) => r.json()).then((d) => setProviders(Array.isArray(d) ? d : []));
@@ -174,57 +172,10 @@ export default function NewPurchasePage() {
     }, []);
 
     // ── Handle scanned invoice data ────────────────────────
+    // Cuando termina el escaneo, abrimos el modal de revisión.
+    // El modal se encarga de match/creación de proveedor, edición y guardado.
     function handleScanComplete(data: ScannedInvoiceData) {
-        // Try to match provider by name or NIF
-        const matchedProvider = providers.find(
-            (p) => {
-                const pName = p.name.toLowerCase().trim();
-                const scannedName = data.providerName.toLowerCase().trim();
-                return pName === scannedName || pName.includes(scannedName) || scannedName.includes(pName);
-            }
-        );
-        if (matchedProvider) {
-            setProviderId(matchedProvider.id);
-        }
-
-        // Fill in basic fields
-        if (data.invoiceNumber) setProviderInvoiceNumber(data.invoiceNumber);
-        if (data.issueDate) setIssueDate(data.issueDate);
-        if (data.dueDate) setDueDate(data.dueDate);
-        if (data.notes) setNotes(data.notes);
-
-        // Build line items from scanned data
-        if (data.lines.length > 0) {
-            const scannedLines: LineItem[] = data.lines.map((sl) => {
-                // Find matching tax by rate
-                const matchedTax = taxes.find(
-                    (t) => Math.abs(t.rate - sl.taxRatePercent) < 0.5
-                );
-
-                return {
-                    key: crypto.randomUUID(),
-                    description: sl.description,
-                    details: sl.details || "",
-                    quantity: String(sl.quantity),
-                    unitPriceEuros: String(sl.unitPriceEuros),
-                    taxId: matchedTax?.id || "",
-                    taxRate: matchedTax?.rate || sl.taxRatePercent,
-                };
-            });
-            setLines(scannedLines);
-        }
-
-        // If provider wasn't matched, store the scanned info so we can offer to create it
-        if (!matchedProvider && data.providerName) {
-            setScannedProviderInfo({
-                name: data.providerName,
-                taxId: data.providerTaxId || "",
-            });
-        } else {
-            setScannedProviderInfo(null);
-        }
-
-        setShowScanner(false);
+        setScanData(data);
     }
 
     function updateLine(key: string, field: string, value: string) {
@@ -259,7 +210,7 @@ export default function NewPurchasePage() {
         return sum + sub * l.taxRate / 100;
     }, 0);
 
-    const retentionEuros = subtotalEuros * retentionRate / 100;
+    const retentionEuros = subtotalEuros * retentionPct / 100;
     const totalEuros = subtotalEuros + taxEuros - retentionEuros;
 
     async function handleSave() {
@@ -284,7 +235,7 @@ export default function NewPurchasePage() {
                     issueDate: issueDate || null,
                     dueDate: dueDate || null,
                     notes: notes || null,
-                    retentionRate,
+                    retentionPct,
                     lines: lines.map((l) => ({
                         description: l.description,
                         details: l.details || null,
@@ -343,64 +294,6 @@ export default function NewPurchasePage() {
                     onScanComplete={handleScanComplete}
                     onError={(msg) => showError(msg)}
                 />
-            )}
-
-            {/* Banner: scanned provider not found */}
-            {scannedProviderInfo && !providerId && (
-                <div style={{
-                    padding: '14px 18px',
-                    borderRadius: 10,
-                    background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(245, 158, 11, 0.14))',
-                    border: '1px solid rgba(245, 158, 11, 0.3)',
-                    marginBottom: 16,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 16,
-                    flexWrap: 'wrap',
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 200 }}>
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d97706" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                            <line x1="12" y1="9" x2="12" y2="13" />
-                            <line x1="12" y1="17" x2="12.01" y2="17" />
-                        </svg>
-                        <div>
-                            <p style={{ margin: 0, fontWeight: 600, fontSize: 14, color: 'var(--text-primary, #111827)' }}>
-                                Proveedor no encontrado: <span style={{ color: '#d97706' }}>{scannedProviderInfo.name}</span>
-                            </p>
-                            {scannedProviderInfo.taxId && (
-                                <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--text-secondary, #6b7280)' }}>
-                                    NIF/CIF detectado: {scannedProviderInfo.taxId}
-                                </p>
-                            )}
-                        </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                        <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => {
-                                setProviderModalInitial({
-                                    name: scannedProviderInfo.name,
-                                    taxId: scannedProviderInfo.taxId,
-                                });
-                                setShowProviderModal(true);
-                            }}
-                            style={{ whiteSpace: 'nowrap' }}
-                        >
-                            Crear proveedor
-                        </button>
-                        <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => setScannedProviderInfo(null)}
-                            style={{ whiteSpace: 'nowrap' }}
-                        >
-                            Ignorar
-                        </button>
-                    </div>
-                </div>
             )}
 
             <div className="card" style={{ marginBottom: 20 }}>
@@ -506,8 +399,8 @@ export default function NewPurchasePage() {
                             <label className="form-label">Retención IRPF</label>
                             <select
                                 className="form-input"
-                                value={retentionRate}
-                                onChange={(e) => setRetentionRate(parseFloat(e.target.value))}
+                                value={retentionPct}
+                                onChange={(e) => setRetentionPct(parseFloat(e.target.value))}
                             >
                                 {RETENTION_OPTIONS.map((opt) => (
                                     <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -528,9 +421,9 @@ export default function NewPurchasePage() {
                                 <span>IVA</span>
                                 <span className="cell-mono" style={{ color: 'var(--color-success, #22c55e)' }}>+{taxEuros.toFixed(2)} €</span>
                             </div>
-                            {retentionRate > 0 && (
+                            {retentionPct > 0 && (
                                 <div className="totals-row">
-                                    <span>Retención IRPF ({retentionRate}%)</span>
+                                    <span>Retención IRPF ({retentionPct}%)</span>
                                     <span className="cell-mono" style={{ color: 'var(--color-error, #ef4444)' }}>-{retentionEuros.toFixed(2)} €</span>
                                 </div>
                             )}
@@ -580,10 +473,25 @@ export default function NewPurchasePage() {
                 onSuccess={(provider) => {
                     setProviders((prev) => [...prev, provider]);
                     setProviderId(provider.id);
-                    setScannedProviderInfo(null);
                     setProviderModalInitial(undefined);
                 }}
                 initialData={providerModalInitial}
+            />
+
+            {/* Modal de revisión post-escaneo (PDF + form completo) */}
+            <EscanerReviewModal
+                isOpen={!!scanData}
+                scanData={scanData}
+                providers={providers}
+                taxes={taxes}
+                onClose={() => setScanData(null)}
+                onSaved={(purchaseId) => {
+                    showSuccess("Factura creada desde escaneo");
+                    setScanData(null);
+                    router.push(`/purchases/${purchaseId}`);
+                }}
+                onProvidersChanged={setProviders}
+                onError={(msg) => showError(msg)}
             />
         </>
     );

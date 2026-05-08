@@ -10,6 +10,14 @@ interface ScannedLineItem {
     taxRatePercent: number;
 }
 
+export interface ScannedAttachment {
+    storagePath: string;
+    publicUrl: string;
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+}
+
 export interface ScannedInvoiceData {
     providerName: string;
     providerTaxId: string;
@@ -19,6 +27,10 @@ export interface ScannedInvoiceData {
     lines: ScannedLineItem[];
     notes: string;
     confidence: number;
+    /** Avisos detectados por la IA (totales que no cuadran, retenciones, campos vacíos, etc.). */
+    warnings: string[];
+    /** Archivo subido a Supabase Storage durante el escaneo. */
+    attachment: ScannedAttachment | null;
 }
 
 interface InvoiceScannerProps {

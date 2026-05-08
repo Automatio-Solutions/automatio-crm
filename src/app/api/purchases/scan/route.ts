@@ -1,222 +1,233 @@
 // ============================================================
 // POST /api/purchases/scan
-// Receives a PDF or image and uses Google Gemini to extract
-// structured purchase invoice data for auto-fill.
+//
+// Recibe un PDF o imagen, lo sube a Supabase Storage (bucket
+// `expense-scans`) y usa Anthropic Claude (vision) para extraer
+// los datos estructurados de la factura para auto-rellenar el form.
+//
+// Devuelve los datos extraídos + la URL pública del archivo guardado,
+// para que el cliente pueda mostrarlo y adjuntarlo al guardar.
 // ============================================================
 
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Anthropic from "@anthropic-ai/sdk";
+import { SCAN_SYSTEM_PROMPT, SCAN_USER_PROMPT } from "@/lib/scan/prompt";
+import type { ScanResponse, ScannedInvoice } from "@/lib/scan/types";
+import { uploadExpenseScan } from "@/lib/storage/expense-scans";
 
-export const maxDuration = 60; // Allow up to 60s for AI processing
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 60; // Hasta 60s para el procesado de IA
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// Modelos: alias hacia las versiones más recientes.
+const MODEL = "claude-haiku-4-5";
 
-interface ScannedLineItem {
-    description: string;
-    details: string;
-    quantity: number;
-    unitPriceEuros: number;   // price in euros (NOT cents)
-    taxRatePercent: number;   // e.g. 21
-}
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
 
-interface ScannedInvoice {
-    providerName: string;
-    providerTaxId: string;     // NIF / CIF
-    invoiceNumber: string;
-    issueDate: string;         // YYYY-MM-DD
-    dueDate: string;           // YYYY-MM-DD
-    lines: ScannedLineItem[];
-    notes: string;
-    confidence: number;        // 0-100
-}
-
-const PROMPT = `Eres un experto en contabilidad española. Analiza esta factura y extrae TODA la información en formato JSON.
-
-REGLAS IMPORTANTES:
-- Las cantidades monetarias deben estar en EUROS (no céntimos). Ejemplo: 100.50, no 10050
-- La fecha debe estar en formato YYYY-MM-DD
-- El taxRatePercent debe ser el porcentaje de IVA (ej: 21, 10, 4, 0)
-- Si no puedes identificar un campo, pon una cadena vacía ""
-- El campo "confidence" debe ser un número del 0 al 100 indicando tu confianza en la extracción
-- El campo "notes" puede incluir cualquier información relevante que no encaje en los otros campos
-- Si hay varias líneas de factura, extrae CADA una por separado
-- El "unitPriceEuros" es el precio unitario SIN IVA
-- Si el precio incluye IVA, calcula el precio sin IVA
-
-Devuelve SOLO un JSON válido con esta estructura exacta, SIN markdown, SIN backticks, SIN explicaciones:
-
-{
-  "providerName": "Nombre del proveedor/empresa que emite la factura",
-  "providerTaxId": "NIF o CIF del proveedor",
-  "invoiceNumber": "Número de factura del proveedor",
-  "issueDate": "YYYY-MM-DD",
-  "dueDate": "YYYY-MM-DD",
-  "lines": [
-    {
-      "description": "Concepto o descripción de la línea",
-      "details": "Detalles adicionales",
-      "quantity": 1,
-      "unitPriceEuros": 100.00,
-      "taxRatePercent": 21
-    }
-  ],
-  "notes": "Información adicional relevante",
-  "confidence": 85
-}`;
-
-// Models to try in order — fallback if primary quota is exhausted
-const MODELS_TO_TRY = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-];
+const ALLOWED_IMAGE_TYPES = [
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+] as const;
+const ALLOWED_DOC_TYPES = ["application/pdf"] as const;
+type ImageMediaType = "image/jpeg" | "image/png" | "image/webp" | "image/gif";
 
 export async function POST(request: Request) {
     try {
-        if (!GEMINI_API_KEY) {
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) {
             return NextResponse.json(
-                { error: "Clave API de Gemini no configurada. Añade GEMINI_API_KEY en las variables de entorno." },
+                { error: "Falta ANTHROPIC_API_KEY en el servidor." },
                 { status: 500 }
             );
         }
 
         const formData = await request.formData();
-        const file = formData.get("file") as File | null;
+        const file = formData.get("file");
 
-        if (!file) {
-            return NextResponse.json({ error: "No se ha proporcionado ningún archivo" }, { status: 400 });
-        }
-
-        // Validate file type
-        const allowedTypes = [
-            "application/pdf",
-            "image/png",
-            "image/jpeg",
-            "image/jpg",
-            "image/webp",
-            "image/heic",
-        ];
-        if (!allowedTypes.includes(file.type)) {
+        if (!(file instanceof File)) {
             return NextResponse.json(
-                { error: "Formato no soportado. Sube un PDF o imagen (PNG, JPG, WebP)." },
+                { error: "No se ha proporcionado ningún archivo." },
+                { status: 400 }
+            );
+        }
+        if (file.size === 0) {
+            return NextResponse.json(
+                { error: "El archivo está vacío." },
+                { status: 400 }
+            );
+        }
+        if (file.size > MAX_BYTES) {
+            return NextResponse.json(
+                {
+                    error: `El archivo es demasiado grande (${(file.size / 1024 / 1024).toFixed(1)} MB). Máximo: 20 MB.`,
+                },
                 { status: 400 }
             );
         }
 
-        // Max 20MB
-        if (file.size > 20 * 1024 * 1024) {
+        // Normalizamos image/jpg → image/jpeg para Claude
+        let mediaType = file.type;
+        if (mediaType === "image/jpg") mediaType = "image/jpeg";
+
+        const isImage = (ALLOWED_IMAGE_TYPES as readonly string[]).includes(mediaType);
+        const isPdf = (ALLOWED_DOC_TYPES as readonly string[]).includes(mediaType);
+        if (!isImage && !isPdf) {
             return NextResponse.json(
-                { error: "El archivo es demasiado grande. Máximo 20 MB." },
+                {
+                    error: `Formato no soportado: ${mediaType}. Sube un PDF o imagen (PNG, JPG, WebP).`,
+                },
                 { status: 400 }
             );
         }
 
+        // 1) Leer bytes (los necesitamos tanto para subir como para Claude).
         const arrayBuffer = await file.arrayBuffer();
-        const base64Data = Buffer.from(arrayBuffer).toString("base64");
+        const base64 = Buffer.from(arrayBuffer).toString("base64");
 
-        // Map MIME types for Gemini
-        let mimeType = file.type;
-        if (mimeType === "image/jpg") mimeType = "image/jpeg";
-
-        // ── Call Google Gemini with fallback models ─────────
-        const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
-        let responseText = "";
-        let lastError: any = null;
-
-        for (const modelName of MODELS_TO_TRY) {
-            try {
-                console.log(`Trying model: ${modelName}`);
-                const model = genAI.getGenerativeModel({ model: modelName });
-
-                const result = await model.generateContent([
-                    PROMPT,
-                    {
-                        inlineData: {
-                            mimeType,
-                            data: base64Data,
-                        },
-                    },
-                ]);
-
-                responseText = result.response.text();
-                lastError = null;
-                console.log(`Success with model: ${modelName}`);
-                break; // Success — exit the loop
-            } catch (modelErr: any) {
-                lastError = modelErr;
-                const errMsg = modelErr?.message || "";
-                console.warn(`Model ${modelName} failed:`, errMsg.substring(0, 200));
-
-                // Only retry with next model if it's a quota/rate error
-                if (errMsg.includes("429") || errMsg.includes("quota") || errMsg.includes("Too Many Requests") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                    continue; // Try next model
-                }
-                // For other errors, don't retry — break
-                break;
-            }
-        }
-
-        if (lastError || !responseText) {
-            const errMsg = lastError?.message || "";
-            if (errMsg.includes("429") || errMsg.includes("quota") || errMsg.includes("Too Many Requests") || errMsg.includes("RESOURCE_EXHAUSTED")) {
-                return NextResponse.json(
-                    { error: "Se ha superado la cuota de la API de Google Gemini. Espera unos minutos e inténtalo de nuevo, o activa la facturación en Google AI Studio." },
-                    { status: 429 }
-                );
-            }
-            console.error("All models failed:", lastError);
+        // 2) Subir a Supabase Storage en paralelo al escaneo.
+        //    Si falla la subida, devolvemos error (igual que Dani).
+        let attachment: ScanResponse["attachment"] = null;
+        try {
+            const uploaded = await uploadExpenseScan(file, arrayBuffer);
+            attachment = {
+                storagePath: uploaded.storagePath,
+                publicUrl: uploaded.publicUrl,
+                filename: uploaded.filename,
+                mimeType: uploaded.mimeType,
+                sizeBytes: uploaded.sizeBytes,
+            };
+        } catch (uploadErr) {
+            console.error("[scan] upload error:", uploadErr);
             return NextResponse.json(
-                { error: "Error al procesar la factura con IA. Inténtalo de nuevo." },
+                {
+                    error:
+                        uploadErr instanceof Error
+                            ? uploadErr.message
+                            : "Error al subir el archivo al almacenamiento.",
+                },
                 { status: 500 }
             );
         }
 
-        // Parse the JSON response — Gemini sometimes wraps in markdown
-        let jsonStr = responseText.trim();
+        // 3) Llamar a Claude Vision con la imagen/PDF.
+        const anthropic = new Anthropic({ apiKey });
 
-        // Remove markdown code fences if present
-        if (jsonStr.startsWith("```")) {
-            jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
-        }
+        const content: Anthropic.MessageParam["content"] = isImage
+            ? [
+                {
+                    type: "image",
+                    source: {
+                        type: "base64",
+                        media_type: mediaType as ImageMediaType,
+                        data: base64,
+                    },
+                },
+                { type: "text", text: SCAN_USER_PROMPT },
+            ]
+            : [
+                {
+                    type: "document",
+                    source: {
+                        type: "base64",
+                        media_type: "application/pdf",
+                        data: base64,
+                    },
+                },
+                { type: "text", text: SCAN_USER_PROMPT },
+            ];
 
-        let scannedData: ScannedInvoice;
-        try {
-            scannedData = JSON.parse(jsonStr);
-        } catch {
-            console.error("Failed to parse Gemini response:", responseText);
+        const message = await anthropic.messages.create({
+            model: MODEL,
+            max_tokens: 2048,
+            system: SCAN_SYSTEM_PROMPT,
+            messages: [{ role: "user", content }],
+        });
+
+        const text = message.content
+            .filter((b): b is Anthropic.TextBlock => b.type === "text")
+            .map((b) => b.text)
+            .join("")
+            .trim();
+
+        const parsed = extractJson(text);
+        if (!parsed) {
+            console.error("[scan] No JSON in Claude response:", text);
             return NextResponse.json(
-                { error: "No se pudo interpretar la respuesta de la IA. Intenta con otra imagen o PDF más claro." },
+                {
+                    error: "No se pudo interpretar la respuesta de la IA. Intenta con otra imagen o PDF más claro.",
+                },
                 { status: 422 }
             );
         }
 
-        // Validate and sanitize the response
-        const sanitized: ScannedInvoice = {
-            providerName: String(scannedData.providerName || ""),
-            providerTaxId: String(scannedData.providerTaxId || ""),
-            invoiceNumber: String(scannedData.invoiceNumber || ""),
-            issueDate: String(scannedData.issueDate || ""),
-            dueDate: String(scannedData.dueDate || ""),
-            notes: String(scannedData.notes || ""),
-            confidence: Number(scannedData.confidence) || 0,
-            lines: Array.isArray(scannedData.lines)
-                ? scannedData.lines.map((line) => ({
-                    description: String(line.description || ""),
-                    details: String(line.details || ""),
-                    quantity: Number(line.quantity) || 1,
-                    unitPriceEuros: Number(line.unitPriceEuros) || 0,
-                    taxRatePercent: Number(line.taxRatePercent) || 0,
-                }))
-                : [],
-        };
+        const sanitized = sanitize(parsed);
 
-        return NextResponse.json(sanitized);
+        const response: ScanResponse = {
+            ...sanitized,
+            attachment,
+        };
+        return NextResponse.json(response);
     } catch (err) {
-        console.error("Invoice scan error:", err);
-        return NextResponse.json(
-            { error: "Error al escanear la factura. Inténtalo de nuevo." },
-            { status: 500 }
-        );
+        console.error("[scan] error:", err);
+        const msg =
+            err instanceof Error
+                ? err.message
+                : "Error al escanear la factura. Inténtalo de nuevo.";
+        return NextResponse.json({ error: msg }, { status: 500 });
     }
+}
+
+// ─── helpers ─────────────────────────────────────────────────
+
+function extractJson(text: string): unknown | null {
+    let s = text.trim();
+    // Quitar fences de markdown si los hubiera
+    if (s.startsWith("```")) {
+        s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+    }
+    // Si todavía hay texto antes/después, extraer { ... }
+    const first = s.indexOf("{");
+    const last = s.lastIndexOf("}");
+    if (first === -1 || last === -1) return null;
+    try {
+        return JSON.parse(s.slice(first, last + 1));
+    } catch {
+        return null;
+    }
+}
+
+function sanitize(raw: unknown): ScannedInvoice {
+    const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+
+    const linesRaw = Array.isArray(r.lines) ? r.lines : [];
+    const lines = linesRaw.map((line) => {
+        const l = (line && typeof line === "object" ? line : {}) as Record<string, unknown>;
+        return {
+            description: String(l.description ?? ""),
+            details: String(l.details ?? ""),
+            quantity: Number(l.quantity) || 1,
+            unitPriceEuros: Number(l.unitPriceEuros) || 0,
+            taxRatePercent: Number(l.taxRatePercent) || 0,
+        };
+    });
+
+    const warningsRaw = Array.isArray(r.warnings) ? r.warnings : [];
+    const warnings = warningsRaw
+        .map((w) => (typeof w === "string" ? w.trim() : ""))
+        .filter((w) => w.length > 0);
+
+    return {
+        providerName: String(r.providerName ?? ""),
+        providerTaxId: String(r.providerTaxId ?? ""),
+        invoiceNumber: String(r.invoiceNumber ?? ""),
+        issueDate: String(r.issueDate ?? ""),
+        dueDate: String(r.dueDate ?? ""),
+        notes: String(r.notes ?? ""),
+        confidence: Number(r.confidence) || 0,
+        lines,
+        warnings,
+    };
 }
