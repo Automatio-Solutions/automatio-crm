@@ -153,10 +153,11 @@ textarea {
 }
 
 .sidebar-logo {
-    padding: 20px 22px;
+    padding: 10px 14px;
     border-bottom: 1px solid var(--color-border-subtle);
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 12px;
 }
 
@@ -1477,12 +1478,15 @@ textarea {
 
 /* ===== Logo Images ===== */
 .sidebar-logo-img {
-    width: 100%;
-    height: auto;
+    /* Fijamos altura concreta; el ancho se ajusta proporcionalmente.
+       Esto evita que el logo "se achique" cuando el SVG es cuadrado y
+       el sidebar le da mucho ancho disponible. */
+    height: 80px;
+    width: auto;
+    max-width: 100%;
     object-fit: contain;
     filter: brightness(0) invert(1);
     opacity: 0.95;
-    padding: 0 8px;
 }
 
 .login-logo-img {
