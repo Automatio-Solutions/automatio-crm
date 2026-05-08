@@ -49,6 +49,7 @@ export async function POST(request: Request) {
             lines,
             attachment,
             retentionPct: retentionPctRaw,
+            retentionCents: retentionCentsRaw,
         } = body;
 
         if (!providerId) {
@@ -94,12 +95,16 @@ export async function POST(request: Request) {
         const taxCents = processedLines.reduce((sum: number, l: any) => sum + l.lineTaxCents, 0);
 
         // Retención (IRPF u otra). Aplicada sobre la base imponible.
-        // Aceptamos cualquier % razonable (0-100); típicamente 0, 7 o 15.
+        // Si el cliente envía retentionCents (calculado por línea), lo usamos
+        // tal cual (es la fuente de verdad). Si no, lo calculamos a partir del %.
         const retentionPctNum = Number(retentionPctRaw);
         const retentionPct = Number.isFinite(retentionPctNum)
             ? Math.max(0, Math.min(100, retentionPctNum))
             : 0;
-        const retentionCents = Math.round((subtotalCents * retentionPct) / 100);
+        const retentionCentsNum = Number(retentionCentsRaw);
+        const retentionCents = Number.isFinite(retentionCentsNum) && retentionCentsNum >= 0
+            ? Math.round(retentionCentsNum)
+            : Math.round((subtotalCents * retentionPct) / 100);
 
         // Total = subtotal + IVA - retention
         const totalCents = subtotalCents + taxCents - retentionCents;

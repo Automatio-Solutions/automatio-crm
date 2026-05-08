@@ -35,6 +35,7 @@ interface LineItem {
     unitPriceEuros: string; // euros como string (ej. "100.50") — convertimos a céntimos al enviar
     taxId: string;
     taxRate: number;        // resuelto desde taxes
+    retentionPct: string;   // % de retención IRPF para esta línea (ej. "15"); "0" si no hay
 }
 
 type Status = "DRAFT" | "BOOKED" | "PAID";
@@ -75,9 +76,6 @@ export default function EscanerReviewModal({
     const [issueDate, setIssueDate] = useState("");
     const [dueDate, setDueDate] = useState("");
     const [status, setStatus] = useState<Status>("DRAFT");
-    // Retención IRPF: % es la fuente de verdad. El € se calcula a partir
-    // del subtotal × %. Si el usuario edita el €, recalculamos el %.
-    const [retentionPct, setRetentionPct] = useState<number>(0);
     const [notes, setNotes] = useState("");
     const [lines, setLines] = useState<LineItem[]>([]);
     const [saving, setSaving] = useState(false);
@@ -108,11 +106,13 @@ export default function EscanerReviewModal({
         setIssueDate(scanData.issueDate || "");
         setDueDate(scanData.dueDate || "");
         setStatus("DRAFT");
-        // Inicializar retención: si Claude detectó un %, lo usamos.
-        // Si no, intentamos derivarlo del importe en euros y el subtotal del documento.
-        const detectedPct = Number(scanData.retentionPct) || 0;
-        setRetentionPct(Math.max(0, Math.min(100, detectedPct)));
         setNotes(scanData.notes || "");
+
+        // Si Claude detectó retención IRPF a nivel de factura, la distribuimos
+        // a cada línea (caso típico: una sola tasa para toda la factura).
+        // El usuario puede editarla por línea después.
+        const detectedPct = Number(scanData.retentionPct) || 0;
+        const lineRetentionPct = Math.max(0, Math.min(100, detectedPct));
 
         const initialLines: LineItem[] = (scanData.lines || []).map((sl) => {
             const matchedTax = taxes.find((t) => Math.abs(t.rate - sl.taxRatePercent) < 0.5);
@@ -124,13 +124,18 @@ export default function EscanerReviewModal({
                 unitPriceEuros: (sl.unitPriceEuros || 0).toFixed(2),
                 taxId: matchedTax?.id || "",
                 taxRate: matchedTax?.rate || sl.taxRatePercent || 0,
+                retentionPct: lineRetentionPct ? String(lineRetentionPct) : "0",
             };
         });
-        setLines(initialLines.length > 0 ? initialLines : [emptyLine()]);
+        setLines(
+            initialLines.length > 0
+                ? initialLines
+                : [emptyLine(lineRetentionPct ? String(lineRetentionPct) : "0")]
+        );
     }, [isOpen, scanData, providers, taxes]);
 
     // ── Cálculos de totales ─────────────────────────────────
-    const totals = useMemo(() => computeTotals(lines, retentionPct), [lines, retentionPct]);
+    const totals = useMemo(() => computeTotals(lines), [lines]);
 
     if (!isOpen || !scanData) return null;
 
@@ -212,7 +217,14 @@ export default function EscanerReviewModal({
                     dueDate: dueDate || null,
                     notes: notes || null,
                     status,
-                    retentionPct,
+                    // La retención se calcula por línea en el cliente; enviamos el
+                    // importe agregado en céntimos (la fuente de verdad) y un %
+                    // derivado por compatibilidad con el modelo de la BD.
+                    retentionCents: totals.retentionCents,
+                    retentionPct:
+                        totals.subtotalCents > 0
+                            ? (totals.retentionCents * 100) / totals.subtotalCents
+                            : 0,
                     lines: lines.map((l) => ({
                         description: l.description,
                         details: l.details || null,
@@ -553,63 +565,14 @@ export default function EscanerReviewModal({
                         >
                             <Row label="Base imponible" value={fmtEuros(totals.subtotalCents)} />
                             <Row label="IVA" value={fmtEuros(totals.taxCents)} />
-                            {retentionPct > 0 && (
+                            {totals.retentionCents > 0 && (
                                 <Row
-                                    label={`Retención IRPF (${retentionPct}%)`}
+                                    label="Retención IRPF"
                                     value={`− ${fmtEuros(totals.retentionCents)}`}
                                     tone="danger"
                                 />
                             )}
                             <Row label="Total" value={fmtEuros(totals.totalCents)} bold />
-                        </div>
-
-                        {/* Retención IRPF: dos inputs en línea, mismo formato que NIF / Nº factura.
-                            % es la fuente de verdad; el € se calcula y, si el usuario lo edita,
-                            recalculamos el %. */}
-                        <div className="form-row">
-                            <Field label="Retención IRPF %">
-                                <input
-                                    type="number"
-                                    className="form-input"
-                                    value={retentionPct === 0 ? "" : String(retentionPct)}
-                                    placeholder="0"
-                                    min="0"
-                                    max="100"
-                                    step="0.01"
-                                    onChange={(e) => {
-                                        const v = parseFloat(e.target.value);
-                                        if (!Number.isFinite(v)) {
-                                            setRetentionPct(0);
-                                        } else {
-                                            setRetentionPct(Math.max(0, Math.min(100, v)));
-                                        }
-                                    }}
-                                />
-                            </Field>
-                            <Field label="Retención €">
-                                <input
-                                    type="number"
-                                    className="form-input"
-                                    value={
-                                        totals.retentionCents === 0
-                                            ? ""
-                                            : (totals.retentionCents / 100).toFixed(2)
-                                    }
-                                    placeholder="0.00"
-                                    min="0"
-                                    step="0.01"
-                                    onChange={(e) => {
-                                        const newEuros = parseFloat(e.target.value);
-                                        if (!Number.isFinite(newEuros) || totals.subtotalCents === 0) {
-                                            setRetentionPct(0);
-                                            return;
-                                        }
-                                        // Recalcular el % a partir del nuevo importe en euros.
-                                        const newPct = (newEuros * 100 * 100) / totals.subtotalCents;
-                                        setRetentionPct(Math.max(0, Math.min(100, newPct)));
-                                    }}
-                                />
-                            </Field>
                         </div>
 
                         <Field label="Notas">
@@ -800,7 +763,9 @@ function ScanLineEditor({
     const unitCents = Math.round((parseFloat(line.unitPriceEuros) || 0) * 100);
     const sub = Math.round(qty * unitCents);
     const tax = Math.round((sub * line.taxRate) / 100);
-    const total = sub + tax;
+    const lineRetPct = parseFloat(line.retentionPct) || 0;
+    const ret = Math.round((sub * lineRetPct) / 100);
+    const total = sub + tax - ret;
 
     return (
         <div
@@ -868,7 +833,7 @@ function ScanLineEditor({
             <div
                 style={{
                     display: "grid",
-                    gridTemplateColumns: "70px 1fr 1.2fr 110px",
+                    gridTemplateColumns: "60px 1fr 1.1fr 80px 110px",
                     gap: 8,
                     alignItems: "end",
                 }}
@@ -910,6 +875,19 @@ function ScanLineEditor({
                             </option>
                         ))}
                     </select>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <MiniLabel>Ret. %</MiniLabel>
+                    <input
+                        className="form-input"
+                        type="number"
+                        value={line.retentionPct === "0" ? "" : line.retentionPct}
+                        onChange={(e) => onUpdate("retentionPct", e.target.value || "0")}
+                        min="0"
+                        max="100"
+                        step="0.01"
+                        placeholder="0"
+                    />
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <MiniLabel>Total</MiniLabel>
@@ -989,7 +967,7 @@ function Row({
 // Helpers
 // ============================================================
 
-function emptyLine(): LineItem {
+function emptyLine(retentionPct = "0"): LineItem {
     return {
         key: crypto.randomUUID(),
         description: "",
@@ -998,21 +976,24 @@ function emptyLine(): LineItem {
         unitPriceEuros: "0.00",
         taxId: "",
         taxRate: 0,
+        retentionPct,
     };
 }
 
-function computeTotals(lines: LineItem[], retentionPct: number) {
+function computeTotals(lines: LineItem[]) {
     let subtotalCents = 0;
     let taxCents = 0;
+    let retentionCents = 0;
     for (const l of lines) {
         const qty = parseFloat(l.quantity) || 0;
         // Calculamos en céntimos para evitar errores de coma flotante.
         const unitCents = Math.round((parseFloat(l.unitPriceEuros) || 0) * 100);
         const sub = Math.round(qty * unitCents);
+        const lineRetPct = parseFloat(l.retentionPct) || 0;
         subtotalCents += sub;
         taxCents += Math.round((sub * l.taxRate) / 100);
+        retentionCents += Math.round((sub * lineRetPct) / 100);
     }
-    const retentionCents = Math.round((subtotalCents * retentionPct) / 100);
     return {
         subtotalCents,
         taxCents,
