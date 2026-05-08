@@ -411,6 +411,10 @@ textarea {
 
 .btn-primary:hover {
     background: var(--color-primary-hover);
+    /* Forzamos color blanco también en hover para sobrescribir la regla global `a:hover`
+       (cuando el botón se renderiza como <Link> → <a>, sin esto el texto se vuelve indigo
+       sobre fondo indigo y desaparece). */
+    color: white;
     transform: translateY(-1px);
     box-shadow: var(--shadow-md), 0 0 20px var(--color-primary-glow);
 }
