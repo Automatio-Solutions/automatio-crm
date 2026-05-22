@@ -141,7 +141,8 @@ export async function POST(request: Request) {
 
         const message = await anthropic.messages.create({
             model: MODEL,
-            max_tokens: 2048,
+            // 4096 para que PDFs multipágina no se corten a la mitad del JSON.
+            max_tokens: 4096,
             system: SCAN_SYSTEM_PROMPT,
             messages: [{ role: "user", content }],
         });

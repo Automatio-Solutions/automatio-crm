@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useNotification } from "@/components/NotificationContext";
 import ProviderModal, { type ProviderModalInitialData } from "@/components/ProviderModal";
-import InvoiceScanner, { type ScannedInvoiceData } from "@/components/InvoiceScanner";
-import EscanerReviewModal from "@/components/EscanerReviewModal";
+import InvoiceScanner from "@/components/InvoiceScanner";
+import EscanerQueueModal from "@/components/EscanerQueueModal";
 
 interface Provider {
     id: string;
@@ -163,19 +163,19 @@ export default function NewPurchasePage() {
     const [showScanner, setShowScanner] = useState(true);
     const [providerModalInitial, setProviderModalInitial] = useState<ProviderModalInitialData | undefined>(undefined);
     const [retentionPct, setRetentionPct] = useState(0);
-    // Datos del escaneo: cuando llegan, abren el modal de revisión.
-    const [scanData, setScanData] = useState<ScannedInvoiceData | null>(null);
+    // Archivos seleccionados en el dropzone: cuando llegan, abren el modal con cola.
+    const [scanFiles, setScanFiles] = useState<File[] | null>(null);
 
     useEffect(() => {
         fetch("/api/providers").then((r) => r.json()).then((d) => setProviders(Array.isArray(d) ? d : []));
         fetch("/api/taxes").then((r) => r.json()).then((d) => setTaxes(Array.isArray(d) ? d : []));
     }, []);
 
-    // ── Handle scanned invoice data ────────────────────────
-    // Cuando termina el escaneo, abrimos el modal de revisión.
-    // El modal se encarga de match/creación de proveedor, edición y guardado.
-    function handleScanComplete(data: ScannedInvoiceData) {
-        setScanData(data);
+    // ── Handle files dropped on scanner ─────────────────────
+    // El dropzone solo recoge archivos. El procesado (subida + IA + revisión + guardado)
+    // ocurre en el EscanerQueueModal con un pool de 3 archivos en paralelo.
+    function handleFilesSelected(files: File[]) {
+        setScanFiles(files);
     }
 
     function updateLine(key: string, field: string, value: string) {
@@ -291,7 +291,7 @@ export default function NewPurchasePage() {
 
             {showScanner && (
                 <InvoiceScanner
-                    onScanComplete={handleScanComplete}
+                    onFilesSelected={handleFilesSelected}
                     onError={(msg) => showError(msg)}
                 />
             )}
@@ -478,17 +478,22 @@ export default function NewPurchasePage() {
                 initialData={providerModalInitial}
             />
 
-            {/* Modal de revisión post-escaneo (PDF + form completo) */}
-            <EscanerReviewModal
-                isOpen={!!scanData}
-                scanData={scanData}
+            {/* Modal de cola del escáner (multi-archivo, pool de 3, timeout, auto-avance) */}
+            <EscanerQueueModal
+                isOpen={!!scanFiles && scanFiles.length > 0}
+                initialFiles={scanFiles || []}
                 providers={providers}
                 taxes={taxes}
-                onClose={() => setScanData(null)}
-                onSaved={(purchaseId) => {
-                    showSuccess("Factura creada desde escaneo");
-                    setScanData(null);
-                    router.push(`/purchases/${purchaseId}`);
+                onClose={() => setScanFiles(null)}
+                onAllSaved={(purchaseIds) => {
+                    setScanFiles(null);
+                    if (purchaseIds.length === 1) {
+                        showSuccess("Factura creada desde escaneo");
+                        router.push(`/purchases/${purchaseIds[0]}`);
+                    } else if (purchaseIds.length > 1) {
+                        showSuccess(`${purchaseIds.length} facturas creadas desde escaneo`);
+                        router.push("/purchases");
+                    }
                 }}
                 onProvidersChanged={setProviders}
                 onError={(msg) => showError(msg)}
