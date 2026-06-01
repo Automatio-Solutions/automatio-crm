@@ -142,7 +142,7 @@ function LineItemEditor({
 export default function PurchaseDetailPage() {
     const { id } = useParams();
     const router = useRouter();
-    const { showError, showConfirm } = useNotification();
+    const { showError, showConfirm, showSuccess } = useNotification();
     const [purchase, setPurchase] = useState<PurchaseInvoice | null>(null);
     const [loading, setLoading] = useState(true);
     const [editing, setEditing] = useState(false);
@@ -157,6 +157,13 @@ export default function PurchaseDetailPage() {
     const [editDueDate, setEditDueDate] = useState("");
     const [editNotes, setEditNotes] = useState("");
     const [editLines, setEditLines] = useState<LineItem[]>([]);
+    // Edición segura (notas, vencimiento, nº proveedor) sobre facturas contabilizadas/pagadas
+    const [showSafeEdit, setShowSafeEdit] = useState(false);
+    const [safeNotes, setSafeNotes] = useState("");
+    const [safeDueDate, setSafeDueDate] = useState("");
+    const [safeProviderInvoiceNumber, setSafeProviderInvoiceNumber] = useState("");
+    const [savingSafe, setSavingSafe] = useState(false);
+    const [creatingRectifying, setCreatingRectifying] = useState(false);
 
     useEffect(() => {
         fetchPurchase();
@@ -308,6 +315,82 @@ export default function PurchaseDetailPage() {
         }
     }
 
+    // ── Edición segura (notas + vencimiento + nº proveedor) ──
+    function openSafeEditModal() {
+        if (!purchase) return;
+        setSafeNotes(purchase.notes || "");
+        setSafeDueDate(
+            purchase.dueDate
+                ? new Date(purchase.dueDate).toISOString().slice(0, 10)
+                : ""
+        );
+        setSafeProviderInvoiceNumber(purchase.providerInvoiceNumber || "");
+        setShowSafeEdit(true);
+    }
+
+    async function handleSaveSafeEdit() {
+        setSavingSafe(true);
+        try {
+            const res = await fetch(`/api/purchases/${id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    notes: safeNotes,
+                    dueDate: safeDueDate || null,
+                    providerInvoiceNumber: safeProviderInvoiceNumber || null,
+                }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error || "Error al guardar");
+            const updated = await res.json();
+            setPurchase(updated);
+            showSuccess("Cambios guardados");
+            setShowSafeEdit(false);
+        } catch (err: any) {
+            showError(err.message);
+        } finally {
+            setSavingSafe(false);
+        }
+    }
+
+    // ── Crear factura rectificativa de proveedor ───────────
+    async function handleCreateRectifying() {
+        if (!purchase) return;
+        if (
+            !(await showConfirm(
+                "¿Crear una factura rectificativa de proveedor? Se creará un borrador con líneas en negativo apuntando a esta factura."
+            ))
+        )
+            return;
+        setCreatingRectifying(true);
+        try {
+            const rectifyLines = (purchase.lines || []).map((l: PurchaseLine) => ({
+                description: l.description,
+                quantity: -Math.abs(Number(l.quantity) || 0),
+                unitPriceCents: l.unitPriceCents,
+                taxId: l.taxId || null,
+                taxRate: l.tax?.rate ?? 0,
+            }));
+            const res = await fetch("/api/purchases", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    providerId: purchase.providerId,
+                    rectifiesPurchaseInvoiceId: purchase.id,
+                    notes: `Rectificativa de la factura ${purchase.number ?? ""}`.trim(),
+                    lines: rectifyLines,
+                }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error || "Error al crear");
+            const newP = await res.json();
+            showSuccess("Rectificativa creada como borrador");
+            router.push(`/purchases/${newP.id}`);
+        } catch (err: any) {
+            showError(err.message);
+        } finally {
+            setCreatingRectifying(false);
+        }
+    }
+
     if (loading) {
         return (
             <div className="loading-center">
@@ -378,9 +461,35 @@ export default function PurchaseDetailPage() {
                                 </>
                             )}
                             {purchase.status === "BOOKED" && (
-                                <button onClick={handlePay} className="btn btn-primary">
-                                    💰 Marcar Pagada
-                                </button>
+                                <>
+                                    <button onClick={handlePay} className="btn btn-primary">
+                                        💰 Marcar Pagada
+                                    </button>
+                                    <button onClick={openSafeEditModal} className="btn btn-secondary">
+                                        ✏️ Editar
+                                    </button>
+                                    <button
+                                        onClick={handleCreateRectifying}
+                                        className="btn btn-secondary"
+                                        disabled={creatingRectifying}
+                                    >
+                                        {creatingRectifying ? "Creando..." : "↩ Rectificativa"}
+                                    </button>
+                                </>
+                            )}
+                            {purchase.status === "PAID" && (
+                                <>
+                                    <button onClick={openSafeEditModal} className="btn btn-secondary">
+                                        ✏️ Editar
+                                    </button>
+                                    <button
+                                        onClick={handleCreateRectifying}
+                                        className="btn btn-secondary"
+                                        disabled={creatingRectifying}
+                                    >
+                                        {creatingRectifying ? "Creando..." : "↩ Rectificativa"}
+                                    </button>
+                                </>
                             )}
                         </>
                     )}
@@ -631,6 +740,78 @@ export default function PurchaseDetailPage() {
                         </div>
                     )}
                 </>
+            )}
+
+            {/* Modal: edición segura sobre facturas contabilizadas / pagadas */}
+            {showSafeEdit && (
+                <div className="modal-overlay" onClick={() => setShowSafeEdit(false)}>
+                    <div
+                        className="modal-content"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ maxWidth: 580 }}
+                    >
+                        <div className="modal-header">
+                            <h2 className="modal-title">Editar campos seguros</h2>
+                            <button className="btn-close" onClick={() => setShowSafeEdit(false)}>
+                                ✕
+                            </button>
+                        </div>
+                        <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+                            <p style={{ fontSize: 12.5, color: "var(--color-text-muted)", marginBottom: 16 }}>
+                                Una factura contabilizada no puede cambiar líneas, importes ni fecha
+                                de emisión. Para correcciones en esos campos usa{" "}
+                                <strong>Rectificativa</strong>. Aquí solo puedes ajustar campos no
+                                contables.
+                            </p>
+                            <div className="form-group">
+                                <label className="form-label">Nº factura proveedor</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={safeProviderInvoiceNumber}
+                                    onChange={(e) => setSafeProviderInvoiceNumber(e.target.value)}
+                                    placeholder="Ej: FA-2026-001"
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Fecha de vencimiento</label>
+                                <input
+                                    type="date"
+                                    className="form-input"
+                                    value={safeDueDate}
+                                    onChange={(e) => setSafeDueDate(e.target.value)}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Notas internas</label>
+                                <textarea
+                                    className="form-textarea"
+                                    rows={4}
+                                    value={safeNotes}
+                                    onChange={(e) => setSafeNotes(e.target.value)}
+                                />
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={() => setShowSafeEdit(false)}
+                                disabled={savingSafe}
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={handleSaveSafeEdit}
+                                disabled={savingSafe}
+                            >
+                                {savingSafe ? "Guardando..." : "Guardar"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </>
     );

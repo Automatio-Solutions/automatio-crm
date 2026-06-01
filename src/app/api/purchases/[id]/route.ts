@@ -95,7 +95,58 @@ export async function PUT(
             return NextResponse.json(updated);
         }
 
+        // ── Safe-field update (cuando NO es DRAFT) ──────────
+        // Solo permitimos cambiar notas, número de factura del proveedor y
+        // fecha de vencimiento. Importes, líneas y fecha de emisión quedan
+        // bloqueados para preservar la integridad fiscal.
+        if (!lines) {
+            const current = await prisma.purchaseInvoice.findUnique({ where: { id } });
+            if (!current) {
+                return NextResponse.json({ error: "Factura no encontrada" }, { status: 404 });
+            }
+            if (current.status !== "DRAFT") {
+                const safeData: Record<string, unknown> = {};
+                if (notes !== undefined) safeData.notes = notes;
+                if (providerInvoiceNumber !== undefined) safeData.providerInvoiceNumber = providerInvoiceNumber;
+                if (dueDate !== undefined) safeData.dueDate = dueDate ? new Date(dueDate) : null;
+
+                if (Object.keys(safeData).length === 0) {
+                    return NextResponse.json(
+                        { error: "No hay campos editables en el body" },
+                        { status: 400 }
+                    );
+                }
+
+                const updated = await prisma.purchaseInvoice.update({
+                    where: { id },
+                    data: safeData,
+                    include: {
+                        provider: { select: { id: true, name: true, taxId: true, email: true } },
+                        lines: { include: { tax: true }, orderBy: { position: "asc" } },
+                    },
+                });
+
+                return NextResponse.json(updated);
+            }
+            // status === "DRAFT" pero sin lines tampoco tiene sentido — devolvemos error
+            return NextResponse.json(
+                { error: "Debe incluir las líneas para una edición completa de borrador" },
+                { status: 400 }
+            );
+        }
+
         // Full update with lines replacement (only DRAFT)
+        const purchaseCheck = await prisma.purchaseInvoice.findUnique({ where: { id } });
+        if (!purchaseCheck) {
+            return NextResponse.json({ error: "Factura no encontrada" }, { status: 404 });
+        }
+        if (purchaseCheck.status !== "DRAFT") {
+            return NextResponse.json(
+                { error: "Una factura contabilizada solo se puede modificar parcialmente o rectificar" },
+                { status: 400 }
+            );
+        }
+
         const processedLines = (lines || []).map((line: any, idx: number) => {
             const qty = parseFloat(line.quantity) || 0;
             const unitCents = parseInt(line.unitPriceCents) || 0;

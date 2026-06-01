@@ -31,6 +31,11 @@ export default function InvoiceDetailPage() {
     const [uploading, setUploading] = useState(false);
     const [showPartialModal, setShowPartialModal] = useState(false);
     const [partialAmount, setPartialAmount] = useState("");
+    // Edición segura (notas, fecha de vencimiento) sobre facturas ya emitidas
+    const [showEditModal, setShowEditModal] = useState(false);
+    const [editNotes, setEditNotes] = useState("");
+    const [editPublicNotes, setEditPublicNotes] = useState("");
+    const [editDueDate, setEditDueDate] = useState("");
 
     useEffect(() => {
         fetch(`/api/invoices/${id}`)
@@ -199,6 +204,75 @@ export default function InvoiceDetailPage() {
         }
     }
 
+    // ── Edición segura de campos no contables (notas + vencimiento) ──
+    function openEditModal() {
+        setEditNotes(invoice?.notes || "");
+        setEditPublicNotes(invoice?.publicNotes || "");
+        setEditDueDate(invoice?.dueDate ? new Date(invoice.dueDate).toISOString().slice(0, 10) : "");
+        setShowEditModal(true);
+    }
+
+    async function handleSaveSafeEdit() {
+        setActionLoading("safeEdit");
+        try {
+            const res = await fetch(`/api/invoices/${id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    notes: editNotes,
+                    publicNotes: editPublicNotes,
+                    dueDate: editDueDate || null,
+                }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            const updated = await res.json();
+            setInvoice(updated);
+            showSuccess("Cambios guardados");
+            setShowEditModal(false);
+        } catch (err: any) {
+            showError(err.message);
+        } finally {
+            setActionLoading("");
+        }
+    }
+
+    // ── Crear factura rectificativa ───────────────────────
+    async function handleCreateRectifying() {
+        if (!await showConfirm(
+            "¿Crear una factura rectificativa? Se creará un borrador con líneas en negativo apuntando a esta factura. Luego podrás ajustarla y emitirla."
+        )) return;
+        setActionLoading("rectify");
+        try {
+            // Las líneas de la rectificativa son las originales con cantidad negada
+            const rectifyLines = (invoice.lines || []).map((l: any) => ({
+                description: l.description,
+                details: l.details || null,
+                quantity: -Math.abs(parseFloat(l.quantity) || 0),
+                unitPriceCents: l.unitPriceCents,
+                taxId: l.taxId || null,
+                taxRate: l.tax?.rate ?? 0,
+            }));
+            const res = await fetch("/api/invoices", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    clientId: invoice.client?.id || invoice.clientId,
+                    rectifiesInvoiceId: invoice.id,
+                    publicNotes: `Rectificativa de la factura ${invoice.number || ""}`.trim(),
+                    lines: rectifyLines,
+                }),
+            });
+            if (!res.ok) throw new Error((await res.json()).error);
+            const newInv = await res.json();
+            showSuccess("Rectificativa creada como borrador");
+            router.push(`/invoices/${newInv.id}`);
+        } catch (err: any) {
+            showError(err.message);
+        } finally {
+            setActionLoading("");
+        }
+    }
+
     if (loading) {
         return <div className="loading-center"><div className="spinner" /></div>;
     }
@@ -285,6 +359,12 @@ export default function InvoiceDetailPage() {
                             <button onClick={handleSendEmail} className="btn btn-secondary" disabled={!!actionLoading}>
                                 {actionLoading === "send" ? "Enviando..." : "📧 Enviar"}
                             </button>
+                            <button onClick={openEditModal} className="btn btn-secondary" disabled={!!actionLoading}>
+                                ✏️ Editar
+                            </button>
+                            <button onClick={handleCreateRectifying} className="btn btn-secondary" disabled={!!actionLoading}>
+                                {actionLoading === "rectify" ? "Creando..." : "↩ Rectificativa"}
+                            </button>
                             <button onClick={handleVoid} className="btn btn-danger btn-sm" disabled={!!actionLoading}>
                                 🚫 Anular
                             </button>
@@ -299,13 +379,39 @@ export default function InvoiceDetailPage() {
                             <button onClick={handleDownloadPDF} className="btn btn-secondary" disabled={!!actionLoading}>
                                 {actionLoading === "pdf" ? "Generando..." : "📄 PDF"}
                             </button>
+                            <button onClick={openEditModal} className="btn btn-secondary" disabled={!!actionLoading}>
+                                ✏️ Editar
+                            </button>
+                            <button onClick={handleCreateRectifying} className="btn btn-secondary" disabled={!!actionLoading}>
+                                {actionLoading === "rectify" ? "Creando..." : "↩ Rectificativa"}
+                            </button>
                             <button onClick={handleVoid} className="btn btn-danger btn-sm" disabled={!!actionLoading}>
                                 🚫 Anular
                             </button>
                         </>
                     )}
-                    {/* PAID/VOID: just PDF */}
-                    {(invoice.status === "PAID" || invoice.status === "VOID") && hasNumber && (
+                    {/* PAID actions: PDF + Editar (campos seguros) + Rectificativa */}
+                    {invoice.status === "PAID" && hasNumber && !isProforma && (
+                        <>
+                            <button onClick={handleDownloadPDF} className="btn btn-secondary" disabled={!!actionLoading}>
+                                📄 PDF
+                            </button>
+                            <button onClick={openEditModal} className="btn btn-secondary" disabled={!!actionLoading}>
+                                ✏️ Editar
+                            </button>
+                            <button onClick={handleCreateRectifying} className="btn btn-secondary" disabled={!!actionLoading}>
+                                {actionLoading === "rectify" ? "Creando..." : "↩ Rectificativa"}
+                            </button>
+                        </>
+                    )}
+                    {/* VOID: just PDF */}
+                    {invoice.status === "VOID" && hasNumber && (
+                        <button onClick={handleDownloadPDF} className="btn btn-secondary" disabled={!!actionLoading}>
+                            📄 PDF
+                        </button>
+                    )}
+                    {/* PAID for proformas: just PDF */}
+                    {invoice.status === "PAID" && hasNumber && isProforma && (
                         <button onClick={handleDownloadPDF} className="btn btn-secondary" disabled={!!actionLoading}>
                             📄 PDF
                         </button>
@@ -544,6 +650,79 @@ export default function InvoiceDetailPage() {
                     )}
                 </div>
             </div>
+
+            {/* Modal: edición segura (notas + vencimiento) en facturas ya emitidas */}
+            {showEditModal && (
+                <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
+                    <div
+                        className="modal-content"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ maxWidth: 580 }}
+                    >
+                        <div className="modal-header">
+                            <h2 className="modal-title">Editar campos seguros</h2>
+                            <button className="btn-close" onClick={() => setShowEditModal(false)}>
+                                ✕
+                            </button>
+                        </div>
+                        <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+                            <p style={{ fontSize: 12.5, color: "var(--color-text-muted)", marginBottom: 16 }}>
+                                Una factura emitida no puede cambiar líneas, importes ni fecha de
+                                emisión. Para correcciones en esos campos usa{" "}
+                                <strong>Rectificativa</strong>. Aquí solo puedes ajustar campos no
+                                contables.
+                            </p>
+                            <div className="form-group">
+                                <label className="form-label">Fecha de vencimiento</label>
+                                <input
+                                    type="date"
+                                    className="form-input"
+                                    value={editDueDate}
+                                    onChange={(e) => setEditDueDate(e.target.value)}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Notas internas</label>
+                                <textarea
+                                    className="form-textarea"
+                                    rows={3}
+                                    value={editNotes}
+                                    onChange={(e) => setEditNotes(e.target.value)}
+                                    placeholder="No se muestran en el PDF"
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Notas públicas (visibles en PDF)</label>
+                                <textarea
+                                    className="form-textarea"
+                                    rows={3}
+                                    value={editPublicNotes}
+                                    onChange={(e) => setEditPublicNotes(e.target.value)}
+                                    placeholder="Aparecen en el pie del PDF enviado al cliente"
+                                />
+                            </div>
+                        </div>
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={() => setShowEditModal(false)}
+                                disabled={actionLoading === "safeEdit"}
+                            >
+                                Cancelar
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={handleSaveSafeEdit}
+                                disabled={actionLoading === "safeEdit"}
+                            >
+                                {actionLoading === "safeEdit" ? "Guardando..." : "Guardar"}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

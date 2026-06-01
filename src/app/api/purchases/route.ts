@@ -41,7 +41,7 @@ export async function POST(request: Request) {
     try {
         const body = await request.json();
         const {
-            providerId,
+            providerId: bodyProviderId,
             providerInvoiceNumber,
             notes,
             issueDate,
@@ -50,7 +50,30 @@ export async function POST(request: Request) {
             attachment,
             retentionPct: retentionPctRaw,
             retentionCents: retentionCentsRaw,
+            rectifiesPurchaseInvoiceId,
         } = body;
+
+        // Si es rectificativa, heredamos el providerId de la factura original.
+        let providerId = bodyProviderId;
+        if (rectifiesPurchaseInvoiceId) {
+            const original = await prisma.purchaseInvoice.findUnique({
+                where: { id: rectifiesPurchaseInvoiceId },
+                select: { id: true, providerId: true, status: true },
+            });
+            if (!original) {
+                return NextResponse.json(
+                    { error: "Factura a rectificar no encontrada" },
+                    { status: 404 }
+                );
+            }
+            if (original.status === "DRAFT") {
+                return NextResponse.json(
+                    { error: "No tiene sentido rectificar un borrador (edítalo directamente)" },
+                    { status: 400 }
+                );
+            }
+            providerId = providerId || original.providerId;
+        }
 
         if (!providerId) {
             return NextResponse.json({ error: "El proveedor es obligatorio" }, { status: 400 });
@@ -123,6 +146,7 @@ export async function POST(request: Request) {
                 retentionPct,
                 retentionCents,
                 totalCents,
+                rectifiesPurchaseInvoiceId: rectifiesPurchaseInvoiceId || null,
                 lines: {
                     create: processedLines,
                 },

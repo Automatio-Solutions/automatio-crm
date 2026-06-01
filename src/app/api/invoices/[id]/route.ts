@@ -98,10 +98,44 @@ export async function PUT(
             return NextResponse.json(updated);
         }
 
-        // ── Full update (DRAFT only) ────────────────────────
+        // ── Safe-field update (cuando NO es DRAFT) ──────────
+        // Solo permitimos cambiar notas, notas públicas y fecha de vencimiento.
+        // Importes, líneas, fecha de emisión, número y tipo quedan bloqueados
+        // para preservar la integridad fiscal de la factura ya emitida.
+        if (invoice.status !== "DRAFT" && !lines) {
+            const safeData: Record<string, unknown> = {};
+            if (notes !== undefined) safeData.notes = notes;
+            if (publicNotes !== undefined) safeData.publicNotes = publicNotes;
+            if (dueDate !== undefined) safeData.dueDate = dueDate ? new Date(dueDate) : null;
+
+            if (Object.keys(safeData).length === 0) {
+                return NextResponse.json(
+                    { error: "No hay campos editables en el body" },
+                    { status: 400 }
+                );
+            }
+
+            const updated = await prisma.invoice.update({
+                where: { id },
+                data: safeData,
+                include: {
+                    client: { select: { id: true, name: true, taxId: true, email: true } },
+                    lines: { include: { tax: true }, orderBy: { position: "asc" } },
+                },
+            });
+
+            await logActivity(invoice.companyId, null, "invoice", id, "UPDATE", {
+                safeEdit: true,
+                fields: Object.keys(safeData),
+            });
+
+            return NextResponse.json(updated);
+        }
+
+        // ── Full update con sustitución de líneas (solo DRAFT) ──
         if (invoice.status !== "DRAFT") {
             return NextResponse.json(
-                { error: "Solo se pueden editar facturas en borrador" },
+                { error: "Una factura emitida solo se puede modificar parcialmente o rectificar" },
                 { status: 400 }
             );
         }

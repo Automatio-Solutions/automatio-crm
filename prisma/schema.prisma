@@ -426,12 +426,15 @@ model PurchaseInvoice {
   totalCents              Int                   @default(0) @map("total_cents")
   paidCents               Int                   @default(0) @map("paid_cents")
   notes                   String?
+  rectifiesPurchaseInvoiceId String?            @map("rectifies_purchase_invoice_id") @db.Uuid
   createdAt               DateTime              @default(now()) @map("created_at")
   updatedAt               DateTime              @updatedAt @map("updated_at")
   deletedAt               DateTime?             @map("deleted_at")
 
   company                 Company               @relation(fields: [companyId], references: [id])
   provider                Provider              @relation(fields: [providerId], references: [id])
+  rectifiesPurchaseInvoice PurchaseInvoice?     @relation("PurchaseCreditNote", fields: [rectifiesPurchaseInvoiceId], references: [id])
+  purchaseCreditNotes     PurchaseInvoice[]     @relation("PurchaseCreditNote")
   lines                   PurchaseInvoiceLine[]
   payments                Payment[]             @relation("PurchaseInvoicePayments")
   bankTransactions        BankTransaction[]     @relation("PurchaseInvoiceBankTransactions")

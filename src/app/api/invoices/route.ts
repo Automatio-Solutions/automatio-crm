@@ -39,10 +39,44 @@ export async function GET(request: Request) {
 }
 
 // POST /api/invoices — Create a new invoice directly (DRAFT, no quote needed)
+// También soporta crear facturas rectificativas (CREDIT_NOTE) pasando
+// rectifiesInvoiceId. En ese caso se hereda el cliente y se sugieren líneas.
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { clientId, notes, publicNotes, issueDate, dueDate, lines } = body;
+        const {
+            clientId: bodyClientId,
+            notes,
+            publicNotes,
+            issueDate,
+            dueDate,
+            lines,
+            rectifiesInvoiceId,
+        } = body;
+
+        // Si es rectificativa, heredamos el clientId de la factura original.
+        let clientId = bodyClientId;
+        let invoiceType: "INVOICE" | "CREDIT_NOTE" = "INVOICE";
+        if (rectifiesInvoiceId) {
+            const original = await prisma.invoice.findUnique({
+                where: { id: rectifiesInvoiceId },
+                select: { id: true, clientId: true, status: true },
+            });
+            if (!original) {
+                return NextResponse.json(
+                    { error: "Factura a rectificar no encontrada" },
+                    { status: 404 }
+                );
+            }
+            if (original.status === "DRAFT") {
+                return NextResponse.json(
+                    { error: "No tiene sentido rectificar un borrador (edítalo directamente)" },
+                    { status: 400 }
+                );
+            }
+            clientId = clientId || original.clientId;
+            invoiceType = "CREDIT_NOTE";
+        }
 
         if (!clientId) {
             return NextResponse.json({ error: "El cliente es obligatorio" }, { status: 400 });
@@ -87,7 +121,7 @@ export async function POST(request: Request) {
             data: {
                 companyId: company.id,
                 clientId,
-                type: "INVOICE",
+                type: invoiceType,
                 status: "DRAFT",
                 notes: notes || null,
                 publicNotes: publicNotes || null,
@@ -97,6 +131,8 @@ export async function POST(request: Request) {
                 taxCents,
                 totalCents,
                 paidCents: 0,
+                // Si viene de rectificación, enlazamos a la factura original
+                rectifiesInvoiceId: rectifiesInvoiceId || null,
                 // sourceQuoteId is null — direct invoice creation
                 lines: {
                     create: processedLines,
@@ -110,6 +146,7 @@ export async function POST(request: Request) {
 
         await logActivity(company.id, null, "invoice", invoice.id, "CREATE", {
             direct: true,
+            rectifying: !!rectifiesInvoiceId,
         });
 
         return NextResponse.json(invoice, { status: 201 });
