@@ -95,56 +95,41 @@ export async function PUT(
             return NextResponse.json(updated);
         }
 
-        // ── Safe-field update (cuando NO es DRAFT) ──────────
-        // Solo permitimos cambiar notas, número de factura del proveedor y
-        // fecha de vencimiento. Importes, líneas y fecha de emisión quedan
-        // bloqueados para preservar la integridad fiscal.
+        // ── Edición parcial (sin líneas, solo metadatos) ────
         if (!lines) {
             const current = await prisma.purchaseInvoice.findUnique({ where: { id } });
             if (!current) {
                 return NextResponse.json({ error: "Factura no encontrada" }, { status: 404 });
             }
-            if (current.status !== "DRAFT") {
-                const safeData: Record<string, unknown> = {};
-                if (notes !== undefined) safeData.notes = notes;
-                if (providerInvoiceNumber !== undefined) safeData.providerInvoiceNumber = providerInvoiceNumber;
-                if (dueDate !== undefined) safeData.dueDate = dueDate ? new Date(dueDate) : null;
+            const partialData: Record<string, unknown> = {};
+            if (notes !== undefined) partialData.notes = notes;
+            if (providerInvoiceNumber !== undefined) partialData.providerInvoiceNumber = providerInvoiceNumber;
+            if (issueDate !== undefined) partialData.issueDate = issueDate ? new Date(issueDate) : null;
+            if (dueDate !== undefined) partialData.dueDate = dueDate ? new Date(dueDate) : null;
+            if (providerId) partialData.providerId = providerId;
 
-                if (Object.keys(safeData).length === 0) {
-                    return NextResponse.json(
-                        { error: "No hay campos editables en el body" },
-                        { status: 400 }
-                    );
-                }
-
-                const updated = await prisma.purchaseInvoice.update({
-                    where: { id },
-                    data: safeData,
-                    include: {
-                        provider: { select: { id: true, name: true, taxId: true, email: true } },
-                        lines: { include: { tax: true }, orderBy: { position: "asc" } },
-                    },
-                });
-
-                return NextResponse.json(updated);
+            if (Object.keys(partialData).length === 0) {
+                return NextResponse.json(
+                    { error: "No hay campos editables en el body" },
+                    { status: 400 }
+                );
             }
-            // status === "DRAFT" pero sin lines tampoco tiene sentido — devolvemos error
-            return NextResponse.json(
-                { error: "Debe incluir las líneas para una edición completa de borrador" },
-                { status: 400 }
-            );
+
+            const updated = await prisma.purchaseInvoice.update({
+                where: { id },
+                data: partialData,
+                include: {
+                    provider: { select: { id: true, name: true, taxId: true, email: true } },
+                    lines: { include: { tax: true }, orderBy: { position: "asc" } },
+                },
+            });
+            return NextResponse.json(updated);
         }
 
-        // Full update with lines replacement (only DRAFT)
+        // ── Edición completa con sustitución de líneas (cualquier estado) ──
         const purchaseCheck = await prisma.purchaseInvoice.findUnique({ where: { id } });
         if (!purchaseCheck) {
             return NextResponse.json({ error: "Factura no encontrada" }, { status: 404 });
-        }
-        if (purchaseCheck.status !== "DRAFT") {
-            return NextResponse.json(
-                { error: "Una factura contabilizada solo se puede modificar parcialmente o rectificar" },
-                { status: 400 }
-            );
         }
 
         const processedLines = (lines || []).map((line: any, idx: number) => {
@@ -170,7 +155,38 @@ export async function PUT(
 
         const subtotalCents = processedLines.reduce((sum: number, l: any) => sum + l.lineSubtotalCents, 0);
         const taxCents = processedLines.reduce((sum: number, l: any) => sum + l.lineTaxCents, 0);
-        const totalCents = subtotalCents + taxCents;
+
+        // Recalcular retención si el cuerpo la incluye (mismo cálculo que en POST).
+        // Si no viene, mantenemos el % previo y recalculamos cents desde el nuevo subtotal.
+        const rawPct = body.retentionPct;
+        const incomingPct = Number(rawPct);
+        const retentionPct = Number.isFinite(incomingPct)
+            ? Math.max(0, Math.min(100, incomingPct))
+            : Number(purchaseCheck.retentionPct) || 0;
+        const rawCents = body.retentionCents;
+        const incomingCents = Number(rawCents);
+        const retentionCents = Number.isFinite(incomingCents) && incomingCents >= 0
+            ? Math.round(incomingCents)
+            : Math.round((subtotalCents * retentionPct) / 100);
+
+        const totalCents = subtotalCents + taxCents - retentionCents;
+
+        // Ajustar paidCents y estado si el nuevo total queda por debajo de lo ya pagado
+        const dataPatch: Record<string, unknown> = {
+            providerId: providerId || undefined,
+            providerInvoiceNumber: providerInvoiceNumber !== undefined ? providerInvoiceNumber : undefined,
+            notes: notes !== undefined ? notes : undefined,
+            issueDate: issueDate ? new Date(issueDate) : undefined,
+            dueDate: dueDate ? new Date(dueDate) : undefined,
+            subtotalCents,
+            taxCents,
+            retentionPct,
+            retentionCents,
+            totalCents,
+        };
+        if (purchaseCheck.paidCents > totalCents) {
+            dataPatch.paidCents = totalCents;
+        }
 
         const purchase = await prisma.$transaction(async (tx) => {
             await tx.purchaseInvoiceLine.deleteMany({ where: { purchaseInvoiceId: id } });
@@ -178,14 +194,7 @@ export async function PUT(
             return tx.purchaseInvoice.update({
                 where: { id },
                 data: {
-                    providerId: providerId || undefined,
-                    providerInvoiceNumber: providerInvoiceNumber !== undefined ? providerInvoiceNumber : undefined,
-                    notes: notes !== undefined ? notes : undefined,
-                    issueDate: issueDate ? new Date(issueDate) : undefined,
-                    dueDate: dueDate ? new Date(dueDate) : undefined,
-                    subtotalCents,
-                    taxCents,
-                    totalCents,
+                    ...dataPatch,
                     lines: {
                         create: processedLines,
                     },

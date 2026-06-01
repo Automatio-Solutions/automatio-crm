@@ -98,17 +98,18 @@ export async function PUT(
             return NextResponse.json(updated);
         }
 
-        // ── Safe-field update (cuando NO es DRAFT) ──────────
-        // Solo permitimos cambiar notas, notas públicas y fecha de vencimiento.
-        // Importes, líneas, fecha de emisión, número y tipo quedan bloqueados
-        // para preservar la integridad fiscal de la factura ya emitida.
-        if (invoice.status !== "DRAFT" && !lines) {
-            const safeData: Record<string, unknown> = {};
-            if (notes !== undefined) safeData.notes = notes;
-            if (publicNotes !== undefined) safeData.publicNotes = publicNotes;
-            if (dueDate !== undefined) safeData.dueDate = dueDate ? new Date(dueDate) : null;
+        // ── Edición parcial (sin líneas, solo metadatos) ────
+        // Cuando el cliente envía cambios sin tocar las líneas (notas, fechas,
+        // cliente, etc.), aplicamos solo lo que viene y dejamos importes intactos.
+        if (!lines) {
+            const partialData: Record<string, unknown> = {};
+            if (notes !== undefined) partialData.notes = notes;
+            if (publicNotes !== undefined) partialData.publicNotes = publicNotes;
+            if (issueDate !== undefined) partialData.issueDate = issueDate ? new Date(issueDate) : null;
+            if (dueDate !== undefined) partialData.dueDate = dueDate ? new Date(dueDate) : null;
+            if (body.clientId !== undefined && body.clientId) partialData.clientId = body.clientId;
 
-            if (Object.keys(safeData).length === 0) {
+            if (Object.keys(partialData).length === 0) {
                 return NextResponse.json(
                     { error: "No hay campos editables en el body" },
                     { status: 400 }
@@ -117,7 +118,7 @@ export async function PUT(
 
             const updated = await prisma.invoice.update({
                 where: { id },
-                data: safeData,
+                data: partialData,
                 include: {
                     client: { select: { id: true, name: true, taxId: true, email: true } },
                     lines: { include: { tax: true }, orderBy: { position: "asc" } },
@@ -125,19 +126,11 @@ export async function PUT(
             });
 
             await logActivity(invoice.companyId, null, "invoice", id, "UPDATE", {
-                safeEdit: true,
-                fields: Object.keys(safeData),
+                partial: true,
+                fields: Object.keys(partialData),
             });
 
             return NextResponse.json(updated);
-        }
-
-        // ── Full update con sustitución de líneas (solo DRAFT) ──
-        if (invoice.status !== "DRAFT") {
-            return NextResponse.json(
-                { error: "Una factura emitida solo se puede modificar parcialmente o rectificar" },
-                { status: 400 }
-            );
         }
 
         const processedLines = (lines || []).map((line: any, idx: number) => {
@@ -165,19 +158,34 @@ export async function PUT(
         const taxCents = processedLines.reduce((sum: number, l: any) => sum + l.lineTaxCents, 0);
         const totalCents = subtotalCents + taxCents;
 
+        // Si el nuevo total es menor que lo ya cobrado, ajustamos el estado.
+        // - Si paid > newTotal → ajustamos paidCents al nuevo total y marcamos PAID.
+        // - Si era PAID pero el nuevo total > paid → pasa a PARTIALLY_PAID.
+        // - Si no había pago → no tocamos paidCents.
+        const dataPatch: Record<string, unknown> = {
+            notes: notes !== undefined ? notes : undefined,
+            publicNotes: publicNotes !== undefined ? publicNotes : undefined,
+            issueDate: issueDate ? new Date(issueDate) : undefined,
+            dueDate: dueDate ? new Date(dueDate) : undefined,
+            clientId: body.clientId || undefined,
+            subtotalCents,
+            taxCents,
+            totalCents,
+        };
+        if (invoice.paidCents > totalCents) {
+            dataPatch.paidCents = totalCents;
+            dataPatch.status = "PAID";
+        } else if (invoice.status === "PAID" && invoice.paidCents < totalCents) {
+            dataPatch.status = "PARTIALLY_PAID";
+        }
+
         const updated = await prisma.$transaction(async (tx) => {
             await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
 
             return tx.invoice.update({
                 where: { id },
                 data: {
-                    notes: notes !== undefined ? notes : undefined,
-                    publicNotes: publicNotes !== undefined ? publicNotes : undefined,
-                    issueDate: issueDate ? new Date(issueDate) : undefined,
-                    dueDate: dueDate ? new Date(dueDate) : undefined,
-                    subtotalCents,
-                    taxCents,
-                    totalCents,
+                    ...dataPatch,
                     lines: {
                         create: processedLines,
                     },
@@ -189,7 +197,10 @@ export async function PUT(
             });
         });
 
-        await logActivity(invoice.companyId, null, "invoice", id, "UPDATE", {});
+        await logActivity(invoice.companyId, null, "invoice", id, "UPDATE", {
+            wasStatus: invoice.status,
+            newStatus: dataPatch.status || invoice.status,
+        });
 
         return NextResponse.json(updated);
     } catch (error) {
